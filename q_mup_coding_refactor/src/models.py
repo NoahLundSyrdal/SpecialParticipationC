@@ -1,114 +1,85 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
-import math
+from typing import Sequence, Tuple, List, Type
 import torch
-from torch import nn
+from torch import nn, Tensor
+from dataclasses import dataclass
+from typing import Literal, Optional
 
 
-ActivationFactory = Callable[[], nn.Module]
+ActivationFactory = Type[nn.Module]  # e.g., nn.Sigmoid or nn.ReLU
+
+
+InitKind = Literal["torch_default", "xavier_uniform", "kaiming_uniform"]
+ScaleKind = Literal["none", "width", "muP_placeholder"]
 
 @dataclass(frozen=True)
 class MLPConfig:
-    """Configuration for an MLP-style classifier/regressor."""
-    in_dim: int
-    width: int
-    depth: int                      # number of hidden layers (>=1 recommended)
-    out_dim: int
-    activation: ActivationFactory = nn.ReLU          # e.g., nn.ReLU, nn.GELU
-    dropout_p: float = 0.0                           # 0.0 disables dropout
-    use_bias: bool = True
-    norm: Optional[str] = None                       # {"layernorm", "batchnorm", None}
-    # Initialization
-    init: str = "xavier_uniform"                     # {"xavier_uniform","kaiming_uniform","none"}
-    # Device/dtype (optional)
+    in_dim: int = 784
+    width: int = 128
+    depth: int = 3
+    out_dim: int = 10
+    activation: ActivationFactory = nn.Sigmoid
+    bias: bool = True
+    init: InitKind = "torch_default"
     device: Optional[torch.device] = None
     dtype: Optional[torch.dtype] = None
 
-
-def _make_norm(norm: Optional[str], hidden_dim: int) -> Optional[nn.Module]:
-    if norm is None:
-        return None
-    if norm.lower() == "layernorm":
-        return nn.LayerNorm(hidden_dim)
-    if norm.lower() == "batchnorm":
-        return nn.BatchNorm1d(hidden_dim)
-    raise ValueError(f"Unknown norm: {norm}")
-
-
-def _init_linear(layer: nn.Linear, scheme: str):
-    if scheme == "none":
+def _init_linear(m: nn.Module, kind: InitKind) -> None:
+    if not isinstance(m, nn.Linear):
         return
-    if scheme == "xavier_uniform":
-        nn.init.xavier_uniform_(layer.weight)
-    elif scheme == "kaiming_uniform":
-        nn.init.kaiming_uniform_(layer.weight, a=math.sqrt(5))
+    if kind == "xavier_uniform":
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif kind == "kaiming_uniform":
+        nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
     else:
-        raise ValueError(f"Unknown init scheme: {scheme}")
-    if layer.bias is not None:
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
-        bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-        nn.init.uniform_(layer.bias, -bound, bound)
+        # torch defaults
+        pass
+
 
 
 class MLP(nn.Module):
-    """Multilayer perceptron with configurable activation, norm, dropout, and init.
+    """
+    Simple equal-width MLP (baseline).
 
     Parameters
     ----------
-    cfg : MLPConfig
-        Configuration object controlling architecture and initialization.
+    in_dim : int
+        Flattened input dimension (e.g., 28*28=784 for MNIST).
+    width : int
+        Hidden layer width (same for all hidden layers).
+    depth : int
+        Number of hidden layers (>= 1).
+    out_dim : int
+        Number of output classes.
+    activation : ActivationFactory
+        Activation class to use; defaults to nn.Sigmoid to match the original.
+    bias : bool
+        Whether to include bias terms in Linear layers.
     """
 
-    def __init__(self, cfg: MLPConfig):
+    def __init__(self, cfg: MLPConfig = MLPConfig()) -> None:
         super().__init__()
-        if cfg.in_dim <= 0 or cfg.out_dim <= 0 or cfg.width <= 0:
-            raise ValueError("in_dim, out_dim, and width must be > 0")
-        if cfg.depth < 1:
-            raise ValueError("depth must be >= 1")
-
-        act = cfg.activation  # factory
-
-        layers: list[nn.Module] = []
-        # First layer
-        layers += [nn.Linear(cfg.in_dim, cfg.width, bias=cfg.use_bias)]
-        if cfg.norm:
-            norm = _make_norm(cfg.norm, cfg.width)
-            if isinstance(norm, nn.BatchNorm1d):
-                layers += [norm]  # BN goes before activation for MLPs commonly
-            else:
-                layers += [norm]
-        layers += [act()]
-        if cfg.dropout_p > 0:
-            layers += [nn.Dropout(cfg.dropout_p)]
-
-        # Hidden layers
+        if cfg.in_dim <= 0 or cfg.width <= 0 or cfg.depth < 1 or cfg.out_dim <= 0:
+            raise ValueError("in_dim, width, out_dim must be >0 and depth >=1")
+        layers: List[nn.Module] = [nn.Linear(cfg.in_dim, cfg.width, bias=cfg.bias), cfg.activation()]
         for _ in range(cfg.depth - 1):
-            layers += [nn.Linear(cfg.width, cfg.width, bias=cfg.use_bias)]
-            if cfg.norm:
-                norm = _make_norm(cfg.norm, cfg.width)
-                layers += [norm]
-            layers += [act()]
-            if cfg.dropout_p > 0:
-                layers += [nn.Dropout(cfg.dropout_p)]
-
-        # Output layer
-        layers += [nn.Linear(cfg.width, cfg.out_dim, bias=cfg.use_bias)]
-
-        # Build sequential and move to device/dtype if requested
+            layers += [nn.Linear(cfg.width, cfg.width, bias=cfg.bias), cfg.activation()]
+        layers += [nn.Linear(cfg.width, cfg.out_dim, bias=cfg.bias)]
         self.net = nn.Sequential(*layers)
-        if cfg.device is not None or cfg.dtype is not None:
-            self.net.to(device=cfg.device, dtype=cfg.dtype)
+        # Optional device/dtype placement
+        if cfg.device or cfg.dtype:
+            self.to(device=cfg.device, dtype=cfg.dtype)
+        # Optional explicit init
+        if cfg.init != "torch_default":
+            self.apply(lambda m: _init_linear(m, cfg.init))
 
-        # Apply initialization
-        if cfg.init != "none":
-            for m in self.modules():
-                if isinstance(m, nn.Linear):
-                    _init_linear(m, cfg.init)
-
-        self.cfg = cfg  # keep around for repr/debug
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
+        """Return logits of shape (batch, out_dim)."""
+        x = x.view(x.size(0), -1)  # flatten
         return self.net(x)
 
     @property
@@ -116,25 +87,43 @@ class MLP(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-class ScaledMLP(MLP):
-    """μP-flavored MLP shell.
+class ScaledMLP(nn.Module):
+    """
+    Variable-width MLP with an explicit TODO hook before activation.
 
-    Note
-    ----
-    This class exposes hooks for μP scaling but does **not** implement full μP rules.
-    To stay faithful to μP, prefer width-aware init/optimizer scaling rather than
-    a post-hoc uniform multiply of all parameters.
+    This preserves the teaching value: students fill the TODO (e.g., μP/width scaling).
+    Returns (logits, activations) where activations are the post-activation tensors
+    (detached), and we intentionally drop the first one to match the original scaffold.
     """
 
-    def __init__(
-        self,
-        cfg: MLPConfig,
-        weight_scale: Optional[float] = None,
-    ):
-        super().__init__(cfg)
-        if weight_scale is not None:
-            # Safer: apply to *weights* only, not biases; do it right after init.
-            with torch.no_grad():
-                for m in self.modules():
-                    if isinstance(m, nn.Linear):
-                        m.weight.mul_(weight_scale)
+    def __init__(self, ..., scale: ScaleKind = "none", init: InitKind = "torch_default"):
+        super().__init__()
+        ...
+        self.scale = scale
+        if init != "torch_default":
+            self.apply(lambda m: _init_linear(m, init))
+
+    def _maybe_scale(self, x: Tensor, layer: nn.Linear) -> Tensor:
+        if self.scale == "width":
+            return x / (layer.out_features ** 0.5)
+        elif self.scale == "muP_placeholder":
+            # Keep as a placeholder to avoid mis-teaching; document true μP separately.
+            return x / (layer.out_features ** 0.5)
+        return x
+
+    def forward(self, x: Tensor) -> Tuple[Tensor, List[Tensor]]:
+        activations: List[Tensor] = []
+        x = x.reshape(x.size(0), -1)
+        for layer in self.hidden:
+            x = layer(x)
+            x = self._maybe_scale(x, layer)  # hook now functional but off by default
+            x = self.act(x)
+            activations.append(x)
+        logits = self.out(x)
+        if activations:
+            activations = activations[1:]
+        return logits, [a.detach() for a in activations]
+
+    @property
+    def num_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
