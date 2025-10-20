@@ -1,145 +1,91 @@
 from __future__ import annotations
-from typing import Sequence, Tuple, List, Type
 import torch
-from torch import nn, Tensor
-from dataclasses import dataclass
-from typing import Literal, Optional
-
-
-ActivationFactory = Type[nn.Module]  # e.g., nn.Sigmoid or nn.ReLU
-
-
-InitKind = Literal["torch_default", "xavier_uniform", "kaiming_uniform"]
-ScaleKind = Literal["none", "width", "muP_placeholder"]
-
-@dataclass(frozen=True)
-class MLPConfig:
-    in_dim: int = 784
-    width: int = 128
-    depth: int = 3
-    out_dim: int = 10
-    activation: ActivationFactory = nn.Sigmoid
-    bias: bool = True
-    init: InitKind = "torch_default"
-    device: Optional[torch.device] = None
-    dtype: Optional[torch.dtype] = None
-
-def _init_linear(m: nn.Module, kind: InitKind) -> None:
-    if not isinstance(m, nn.Linear):
-        return
-    if kind == "xavier_uniform":
-        nn.init.xavier_uniform_(m.weight)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-    elif kind == "kaiming_uniform":
-        nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-    else:
-        # torch defaults
-        pass
-
+import torch.nn as nn
+from torch import Tensor
+from typing import List, Tuple
 
 
 class MLP(nn.Module):
     """
-    Simple equal-width MLP (baseline).
-
-    Parameters
-    ----------
-    in_dim : int
-        Flattened input dimension (e.g., 28*28=784 for MNIST).
-    width : int
-        Hidden layer width (same for all hidden layers).
-    depth : int
-        Number of hidden layers (>= 1).
-    out_dim : int
-        Number of output classes.
-    activation : ActivationFactory
-        Activation class to use; defaults to nn.Sigmoid to match the original.
-    bias : bool
-        Whether to include bias terms in Linear layers.
+    Equal-width feedforward MLP.
+    Mirrors the structure from the notebook version (bias=True).
+    Returns:
+      logits: Tensor of shape [B, num_classes]
+      activations: list of Tensors for hidden-layer activations (starting from layer 2 per your original pattern)
     """
-
-    def __init__(self, cfg: MLPConfig = MLPConfig()) -> None:
+    def __init__(
+        self,
+        input_size: int = 784,
+        hidden_sizes: List[int] = [8, 16, 32, 64, 128],
+        num_classes: int = 10,
+    ) -> None:
         super().__init__()
-        if cfg.in_dim <= 0 or cfg.width <= 0 or cfg.depth < 1 or cfg.out_dim <= 0:
-            raise ValueError("in_dim, width, out_dim must be >0 and depth >=1")
-        layers: List[nn.Module] = [nn.Linear(cfg.in_dim, cfg.width, bias=cfg.bias), cfg.activation()]
-        for _ in range(cfg.depth - 1):
-            layers += [nn.Linear(cfg.width, cfg.width, bias=cfg.bias), cfg.activation()]
-        layers += [nn.Linear(cfg.width, cfg.out_dim, bias=cfg.bias)]
-        self.net = nn.Sequential(*layers)
-        # Optional device/dtype placement
-        if cfg.device or cfg.dtype:
-            self.to(device=cfg.device, dtype=cfg.dtype)
-        # Optional explicit init
-        if cfg.init != "torch_default":
-            self.apply(lambda m: _init_linear(m, cfg.init))
+        all_sizes = [input_size] + hidden_sizes + [num_classes]
+        self.layers = nn.ModuleList(
+            [nn.Linear(all_sizes[i], all_sizes[i + 1], bias=True) for i in range(len(all_sizes) - 1)]
+        )
+        self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x: Tensor) -> Tensor:
-        """Return logits of shape (batch, out_dim)."""
-        x = x.view(x.size(0), -1)  # flatten
-        return self.net(x)
+    def forward(self, x: Tensor) -> Tuple[Tensor, List[Tensor]]:
+        activations: List[Tensor] = []
+        # Flatten (batch_size, 28*28) — matches original
+        x = x.view(x.size(0), -1)
 
-    @property
-    def num_params(self) -> int:
-        return sum(p.numel() for p in self.parameters())
+        # Hidden layers (all but last)
+        for layer in self.layers[:-1]:
+            x = layer(x)
+
+            ## TODO
+            # Keep this hook exactly where it was in your notebook.
+            # Put any μP / scaling / normalization experiment here.
+            pass
+            ##
+
+            x = self.sigmoid(x)
+            activations.append(x)
+
+        # Final linear head (no activation)
+        x = self.layers[-1](x)
+
+        # Your original notebook trimmed the first activation: activations = activations[1:]
+        activations = activations[1:]
+        return x, [a.detach() for a in activations]
 
 
 class ScaledMLP(nn.Module):
     """
-    Variable-width MLP with an explicit TODO hook before activation.
-
-    This preserves the teaching value: students fill the TODO (e.g., μP/width scaling).
-    Returns (logits, activations) where activations are the post-activation tensors
-    (detached), and we intentionally drop the first one to match the original scaffold.
+    Bias-free variant (as in your notebook) intended for scaling experiments.
+    Keeps the same forward() flow and the TODO hook location.
     """
-
-    def __init__(self, cfg: MLPConfig = MLPConfig(), scale: ScaleKind = "none", init: InitKind = "torch_default") -> None:
+    def __init__(
+        self,
+        input_size: int = 784,
+        hidden_sizes: List[int] = [8, 16, 32, 64, 128],
+        num_classes: int = 10,
+    ) -> None:
         super().__init__()
-        if cfg.in_dim <= 0 or cfg.width <= 0 or cfg.depth < 1 or cfg.out_dim <= 0:
-            raise ValueError("in_dim, width, out_dim must be >0 and depth >=1")
-        self.scale = scale
-        # activation instance
-        self.act = cfg.activation()
-        # build hidden linear layers as ModuleList so we can iterate in forward
-        self.hidden = nn.ModuleList()
-        # first hidden layer from input to width
-        self.hidden.append(nn.Linear(cfg.in_dim, cfg.width, bias=cfg.bias))
-        # remaining hidden layers width -> width
-        for _ in range(cfg.depth - 1):
-            self.hidden.append(nn.Linear(cfg.width, cfg.width, bias=cfg.bias))
-        # output layer
-        self.out = nn.Linear(cfg.width, cfg.out_dim, bias=cfg.bias)
-        # Optional device/dtype placement
-        if cfg.device or cfg.dtype:
-            self.to(device=cfg.device, dtype=cfg.dtype)
-        # Optional explicit init
-        if init != "torch_default":
-            self.apply(lambda m: _init_linear(m, init))
-
-    def _maybe_scale(self, x: Tensor, layer: nn.Linear) -> Tensor:
-        if self.scale == "width":
-            return x / (layer.out_features ** 0.5)
-        elif self.scale == "muP_placeholder":
-            # Keep as a placeholder to avoid mis-teaching; document true μP separately.
-            return x / (layer.out_features ** 0.5)
-        return x
+        all_sizes = [input_size] + hidden_sizes + [num_classes]
+        self.layers = nn.ModuleList(
+            [nn.Linear(all_sizes[i], all_sizes[i + 1], bias=False) for i in range(len(all_sizes) - 1)]
+        )
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: Tensor) -> Tuple[Tensor, List[Tensor]]:
         activations: List[Tensor] = []
-        x = x.reshape(x.size(0), -1)
-        for layer in self.hidden:
-            x = layer(x)
-            x = self._maybe_scale(x, layer)  # hook now functional but off by default
-            x = self.act(x)
-            activations.append(x)
-        logits = self.out(x)
-        if activations:
-            activations = activations[1:]
-        return logits, [a.detach() for a in activations]
+        x = x.view(x.size(0), -1)  # Flatten: (batch_size, 28*28)
 
-    @property
-    def num_params(self) -> int:
-        return sum(p.numel() for p in self.parameters())
+        for layer in self.layers[:-1]:
+            x = layer(x)
+
+            ## TODO
+            # Keep this hook exactly where it was in your notebook.
+            # Put any μP / scaling / normalization experiment here.
+            pass
+            ##
+
+            x = self.sigmoid(x)
+            activations.append(x)
+
+        x = self.layers[-1](x)
+        activations = activations[1:]
+        return x, [a.detach() for a in activations]
