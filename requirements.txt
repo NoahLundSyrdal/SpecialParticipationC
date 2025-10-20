@@ -5,3 +5,7 @@ matplotlib
 jupyter
 tensorflow
 keras
+numpy
+matplotlib
+keras
+jupyter
