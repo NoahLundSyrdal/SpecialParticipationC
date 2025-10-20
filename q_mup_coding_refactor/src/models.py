@@ -96,10 +96,26 @@ class ScaledMLP(nn.Module):
     (detached), and we intentionally drop the first one to match the original scaffold.
     """
 
-    def __init__(self, ..., scale: ScaleKind = "none", init: InitKind = "torch_default"):
+    def __init__(self, cfg: MLPConfig = MLPConfig(), scale: ScaleKind = "none", init: InitKind = "torch_default") -> None:
         super().__init__()
-        ...
+        if cfg.in_dim <= 0 or cfg.width <= 0 or cfg.depth < 1 or cfg.out_dim <= 0:
+            raise ValueError("in_dim, width, out_dim must be >0 and depth >=1")
         self.scale = scale
+        # activation instance
+        self.act = cfg.activation()
+        # build hidden linear layers as ModuleList so we can iterate in forward
+        self.hidden = nn.ModuleList()
+        # first hidden layer from input to width
+        self.hidden.append(nn.Linear(cfg.in_dim, cfg.width, bias=cfg.bias))
+        # remaining hidden layers width -> width
+        for _ in range(cfg.depth - 1):
+            self.hidden.append(nn.Linear(cfg.width, cfg.width, bias=cfg.bias))
+        # output layer
+        self.out = nn.Linear(cfg.width, cfg.out_dim, bias=cfg.bias)
+        # Optional device/dtype placement
+        if cfg.device or cfg.dtype:
+            self.to(device=cfg.device, dtype=cfg.dtype)
+        # Optional explicit init
         if init != "torch_default":
             self.apply(lambda m: _init_linear(m, init))
 
