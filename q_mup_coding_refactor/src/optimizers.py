@@ -31,17 +31,17 @@ from typing import Iterable, Optional, Tuple, Dict, Any
 
 class SimpleAdam(Optimizer):
     """
-    Simplified Adam optimizer (constructor only).
+    Simplified Adam optimizer implementation.
 
     Args:
-        params (Iterable): Iterable of model parameters to optimize.
+        params (Iterable[Any]): Iterable of parameters to optimize.
         lr (float): Learning rate. Default is 0.1.
-        b1 (float): Exponential decay rate for first-moment estimates. Default is 0.9.
-        b2 (float): Exponential decay rate for second-moment estimates. Default is 0.999.
+        b1 (float): Exponential decay rate for first-moment estimates (β₁). Default is 0.9.
+        b2 (float): Exponential decay rate for second-moment estimates (β₂). Default is 0.999.
 
     Notes:
-        - This version initializes the optimizer state following PyTorch conventions.
-        - The actual `step()` implementation should define the Adam update rule.
+        - This implementation is intentionally minimal for clarity and learning.
+        - It matches the original assignment’s variable names and logic.
     """
 
     def __init__(
@@ -51,7 +51,7 @@ class SimpleAdam(Optimizer):
         b1: float = 0.9,
         b2: float = 0.999,
     ) -> None:
-        # Validate hyperparameters for correctness
+        # --- Validate input hyperparameters ---
         if lr <= 0.0:
             raise ValueError(f"Invalid learning rate: {lr}. Must be positive.")
         if not 0.0 <= b1 < 1.0:
@@ -59,11 +59,61 @@ class SimpleAdam(Optimizer):
         if not 0.0 <= b2 < 1.0:
             raise ValueError(f"Invalid b2 value: {b2}. Must be in [0, 1).")
 
-        # Set optimizer defaults following PyTorch convention
+        # Default parameter group configuration
         defaults = dict(lr=lr, b1=b1, b2=b2)
-
-        # Proper Python 3 `super()` usage — no need to pass class name explicitly
         super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure: Optional[callable] = None) -> None:
+        """
+        Performs a single optimization step.
+
+        Args:
+            closure (callable, optional): Re-evaluates the model and returns the loss.
+        """
+        # Allow optional closure for loss recomputation
+        if closure is not None:
+            with torch.enable_grad():
+                closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            b1 = group["b1"]
+            b2 = group["b2"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise RuntimeError("SimpleAdam does not support sparse gradients")
+
+                # Retrieve parameter state or initialize
+                state = self.state[p]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["momentum"] = torch.zeros_like(p)
+                    state["variance"] = torch.zeros_like(p)
+
+                # Increment step counter
+                state["step"] += 1
+                step = state["step"]
+                m, v = state["momentum"], state["variance"]
+
+                # Update moving averages
+                m.lerp_(grad, 1 - b1)
+                v.lerp_(grad * grad, 1 - b2)
+
+                # Bias correction
+                m_hat = m / (1 - b1**step)
+                v_hat = v / (1 - b2**step)
+
+                # Parameter update
+                u = m_hat / (torch.sqrt(v_hat) + 1e-16)
+                p.add_(u, alpha=-lr)
+
+        return None
 
 
 
