@@ -26,7 +26,98 @@ Example:
 
 import torch
 from torch.optim.optimizer import Optimizer
-from typing import Iterable, Optional, Tuple, Dict
+from typing import Iterable, Optional, Tuple, Dict, Any
+
+
+class SimpleAdam(Optimizer):
+    """
+    Simplified Adam optimizer implementation.
+
+    Args:
+        params (Iterable[Any]): Iterable of parameters to optimize.
+        lr (float): Learning rate. Default is 0.1.
+        b1 (float): Exponential decay rate for first-moment estimates (β₁). Default is 0.9.
+        b2 (float): Exponential decay rate for second-moment estimates (β₂). Default is 0.999.
+
+    Notes:
+        - This implementation is intentionally minimal for clarity and learning.
+        - It matches the original assignment’s variable names and logic.
+    """
+
+    def __init__(
+        self,
+        params: Iterable[Any],
+        lr: float = 1e-1,
+        b1: float = 0.9,
+        b2: float = 0.999,
+    ) -> None:
+        # --- Validate input hyperparameters ---
+        if lr <= 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}. Must be positive.")
+        if not 0.0 <= b1 < 1.0:
+            raise ValueError(f"Invalid b1 value: {b1}. Must be in [0, 1).")
+        if not 0.0 <= b2 < 1.0:
+            raise ValueError(f"Invalid b2 value: {b2}. Must be in [0, 1).")
+
+        # Default parameter group configuration
+        defaults = dict(lr=lr, b1=b1, b2=b2)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure: Optional[callable] = None) -> None:
+        """
+        Performs a single optimization step.
+
+        Args:
+            closure (callable, optional): Re-evaluates the model and returns the loss.
+        """
+        # Allow optional closure for loss recomputation
+        if closure is not None:
+            with torch.enable_grad():
+                closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            b1 = group["b1"]
+            b2 = group["b2"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                if grad.is_sparse:
+                    raise RuntimeError("SimpleAdam does not support sparse gradients")
+
+                # Retrieve parameter state or initialize
+                state = self.state[p]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["momentum"] = torch.zeros_like(p)
+                    state["variance"] = torch.zeros_like(p)
+
+                # Increment step counter
+                state["step"] += 1
+                step = state["step"]
+                m, v = state["momentum"], state["variance"]
+
+                # Update moving averages
+                m.lerp_(grad, 1 - b1)
+                v.lerp_(grad * grad, 1 - b2)
+
+                # Bias correction
+                m_hat = m / (1 - b1**step)
+                v_hat = v / (1 - b2**step)
+
+                # Parameter update
+                u = m_hat / (torch.sqrt(v_hat) + 1e-16)
+                p.add_(u, alpha=-lr)
+
+        return None
+
+
+
+
 
 
 class SimpleAdamMuP(Optimizer):
@@ -71,7 +162,7 @@ class SimpleAdamMuP(Optimizer):
         self.layer_scales = layer_scales or {}
 
     @torch.no_grad()
-    def step(self, closure: Optional[callable] = None) -> Optional[float]:
+    def step(self, closure: Optional[callable] = None) -> None:
         """Perform a single optimization step."""
         for group in self.param_groups:
             lr = group["lr"]
@@ -126,6 +217,96 @@ class SimpleAdamMuP(Optimizer):
                 ############################
 
                 # Update parameters
+                p.add_(u, alpha=-lr)
+
+        return None
+    
+
+class SimpleShampoo(Optimizer):
+    """
+    Simplified Shampoo optimizer with exponential moving average of gradients.
+
+    Args:
+        params (Any): Iterable of parameters to optimize or dicts defining parameter groups.
+        lr (float): Learning rate (default: 0.1).
+        b1 (float): Momentum coefficient (default: 0.9).
+
+    Notes:
+        - The implementation is intentionally simplified for conceptual teaching.
+        - The TODO marks where layer-wise preconditioning would be added in full Shampoo.
+        - This optimizer currently behaves like a momentum-based variant of SGD.
+
+    Example:
+        >>> import torch
+        >>> from optimizer_shampoo import SimpleShampoo
+        >>> model = torch.nn.Linear(10, 2)
+        >>> optimizer = SimpleShampoo(model.parameters(), lr=0.1)
+        >>> x, y = torch.randn(8, 10), torch.randn(8, 2)
+        >>> loss_fn = torch.nn.MSELoss()
+        >>> optimizer.zero_grad()
+        >>> loss = loss_fn(model(x), y)
+        >>> loss.backward()
+        >>> optimizer.step()
+    """
+
+    def __init__(self, params: Any, lr: float = 1e-1, b1: float = 0.9):
+        if lr <= 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if not 0.0 <= b1 < 1.0:
+            raise ValueError(f"Invalid momentum coefficient b1: {b1}")
+
+        defaults = dict(lr=lr, b1=b1)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure: Optional[callable] = None) -> None:
+        """
+        Performs a single optimization step.
+
+        Args:
+            closure (callable, optional): A closure that reevaluates the model and returns the loss.
+        """
+        for group in self.param_groups:
+            b1 = group["b1"]
+            lr = group["lr"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError("SimpleShampoo does not support sparse gradients")
+
+                # Retrieve the parameter state
+                state = self.state[p]
+
+                # Initialize state if this is the first update
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["momentum"] = torch.zeros_like(p)
+
+                state["step"] += 1
+                m = state["momentum"]
+
+                # Update momentum buffer
+                m.lerp_(grad, 1 - b1)
+
+                # TODO ########################
+                # In full Shampoo, this is where you would apply a
+                # preconditioner derived from the second-order
+                # statistics of the gradient. For simplicity,
+                # we ignore this and just use `m` directly.
+                #######################################
+                if len(m.shape) == 1:
+                    u = m  # Ignore biases for this simplified version
+                else:
+                    # Placeholder for matrix preconditioning logic
+                    u = m  # TODO: Implement preconditioning here
+                raise NotImplementedError
+                #######################################
+
+                # Parameter update
                 p.add_(u, alpha=-lr)
 
         return None
