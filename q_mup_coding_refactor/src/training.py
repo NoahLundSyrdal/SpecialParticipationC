@@ -1,10 +1,10 @@
 from __future__ import annotations
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Sequence
+import random
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 import matplotlib.pyplot as plt
-import random
 from torch import Tensor
 
 
@@ -19,18 +19,17 @@ def get_device() -> torch.device:
 
 
 def to_device(t: Tensor, device: Optional[torch.device]) -> Tensor:
-    if device is None:
-        return t
-    return t.to(device)
+    return t if device is None else t.to(device)
 
 
-def rms(x: torch.Tensor, dim=None, keepdim=False):
+def rms(x: torch.Tensor, dim=None, keepdim: bool = False) -> torch.Tensor:
     return torch.sqrt(torch.mean(x**2, dim=dim, keepdim=keepdim) + 1e-12)
 
+
 def train_one_step(
-    mlp: Callable,
-    hiddens: List[int],
-    optimizer: Callable,
+    mlp: Callable,                    # factory/class, must accept hidden_sizes=
+    hiddens: Optional[Sequence[int]] = None,
+    optimizer: Callable = None,       # e.g., torch.optim.Adam or SimpleAdam
     label: str = "Adam",
     lr: float = 0.01,
     *,
@@ -38,16 +37,24 @@ def train_one_step(
     train_labels: Tensor,
     batch_idx: Optional[np.ndarray] = None,
     device: Optional[torch.device] = None,
+    seed: Optional[int] = None,
 ) -> Tuple[float, float]:
     """
     Builds a model, runs two steps on the same batch, and plots RMS of activation deltas per layer.
     The model's forward must return (logits, activations).
     """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if seed is not None:
+        set_seed(seed)
 
-    # Build model; expects your factory to accept `hidden_sizes=...`
-    model = mlp(hidden_sizes=hiddens).to(device)
+    if hiddens is None:
+        hiddens = [8, 16, 32, 64, 128]
+
+    if optimizer is None:
+        raise ValueError("optimizer class must be provided")
+
+    device = get_device() if device is None else device
+
+    model = mlp(hidden_sizes=list(hiddens)).to(device)
     criterion = nn.CrossEntropyLoss()
     optim_inst = optimizer(model.parameters(), lr=lr)
 
@@ -56,19 +63,19 @@ def train_one_step(
         batch_idx = np.random.randint(0, len(train_images), size=64)
 
     prev_activations = None
-    activation_deltas_rms = []
+    activation_deltas_rms: List[float] = []
 
     for i in range(2):
-        images_batch = train_images[batch_idx].to(device)
-        labels_batch = train_labels[batch_idx].to(device)
+        images_batch = to_device(train_images[batch_idx], device)
+        labels_batch = to_device(train_labels[batch_idx], device)
 
         optim_inst.zero_grad(set_to_none=True)
-        logits, activations = model(images_batch)      # <- must return (logits, activations)
+        logits, activations = model(images_batch)  # (logits, activations)
         loss = criterion(logits, labels_batch)
         loss.backward()
         optim_inst.step()
 
-        if i > 0:
+        if i > 0 and prev_activations is not None:
             deltas = [a - pa for a, pa in zip(activations, prev_activations)]
             activation_deltas_rms = [rms(d, dim=-1).mean().item() for d in deltas]
 
@@ -81,19 +88,21 @@ def train_one_step(
         plt.title(f"RMS of activation deltas per layer ({label})")
         plt.xlabel("Hidden layer index")
         plt.bar(xs, activation_deltas_rms)
-        plt.xticks(xs, hiddens[1:] if len(hiddens) > 1 else hiddens)
+        # labels correspond to returned activations (first hidden dropped)
+        tick_labels = list(hiddens[1:]) if len(hiddens) > 1 else list(hiddens)
+        plt.xticks(xs, tick_labels)
         plt.show()
 
-    # return last-step loss/acc in case you want to log it
+    # return last-step loss/acc for logging
     with torch.no_grad():
         acc = (logits.argmax(1) == labels_batch).float().mean().item()
-    return loss.item(), acc
+    return float(loss.item()), float(acc)
 
 
 def train_one_step_matrices(
-    mlp: Callable = None,
-    hiddens: List[int] = [8, 16, 64, 64, 64, 256, 256, 1024],
-    optimizer: Callable = None,
+    mlp: Optional[Callable] = None,
+    hiddens: Optional[Sequence[int]] = None,
+    optimizer: Optional[Callable] = None,
     label: str = "Adam",
     lr: float = 0.01,
     *,
@@ -101,9 +110,13 @@ def train_one_step_matrices(
     train_labels: Optional[Tensor] = None,
     batch_idx: Optional[np.ndarray] = None,
     device: Optional[torch.device] = None,
-):
+    seed: Optional[int] = None,
+) -> None:
+    if seed is not None:
+        set_seed(seed)
+    if hiddens is None:
+        hiddens = [8, 16, 64, 64, 64, 256, 256, 1024]
     if mlp is None:
-        # resolve at runtime to avoid stale references
         from models import MLP as _MLP
         mlp = _MLP
     if optimizer is None:
@@ -113,7 +126,7 @@ def train_one_step_matrices(
 
     device = get_device() if device is None else device
 
-    model = mlp(hidden_sizes=hiddens).to(device)
+    model = mlp(hidden_sizes=list(hiddens)).to(device)
     criterion = nn.CrossEntropyLoss()
     optim_inst = optimizer(model.parameters(), lr=lr)
 
@@ -122,17 +135,17 @@ def train_one_step_matrices(
 
     old_params = [p.detach().clone() for p in model.parameters()]
 
-    images_batch = train_images[batch_idx].to(device)
-    labels_batch = train_labels[batch_idx].to(device)
+    images_batch = to_device(train_images[batch_idx], device)
+    labels_batch = to_device(train_labels[batch_idx], device)
 
-    optim_inst.zero_grad()
-    outputs, activations = model(images_batch)  # forward must return (logits, activations)
+    optim_inst.zero_grad(set_to_none=True)
+    outputs, activations = model(images_batch)  # (logits, activations)
     loss = criterion(outputs, labels_batch)
     loss.backward()
     optim_inst.step()
 
     new_params = [p.detach().clone() for p in model.parameters()]
-    delta_params = [new_p - old_p for new_p, old_p in zip(new_params, old_params)]
+    delta_params = [new - old for new, old in zip(new_params, old_params)]
 
     frob_norms: List[float] = []
     spectral_norms: List[float] = []
@@ -140,36 +153,37 @@ def train_one_step_matrices(
     p_shapes: List[Tuple[int, ...]] = []
 
     for p in delta_params:
-        if len(p.shape) == 2:
-            p_shapes.append(tuple(p.shape))
-            frob_norms.append(float(torch.norm(p).cpu().numpy()))
+        if p.ndim == 2:
+            cpu_p = p.detach().float().cpu()
+            p_shapes.append(tuple(cpu_p.shape))
+            frob_norms.append(float(torch.linalg.norm(cpu_p)))
             try:
-                # approximate spectral norm via svd (may be slow)
-                u, s, v = torch.linalg.svd(p)
-                spectral_norms.append(float(s[0].cpu().numpy()))
+                # faster + stable for tall/wide matrices
+                _, s, _ = torch.linalg.svd(cpu_p, full_matrices=False)
+                spectral_norms.append(float(s[0]))
             except Exception:
-                spectral_norms.append(float(0.0))
-            # Induced RMS-RMS placeholder: use mean RMS of rows
-            induced_norms.append(float(torch.mean(rms(p, dim=1)).cpu().numpy()))
+                spectral_norms.append(0.0)
+            # Induced RMS-RMS placeholder: mean RMS of rows
+            induced_norms.append(float(torch.mean(rms(cpu_p, dim=1))))
 
     fig, axs = plt.subplots(1, 3, figsize=(20, 6))
 
     axs[0].set_title(f"Frobenius norm of update per layer ({label})")
-    axs[0].set_xlabel("Hidden Size of layer")
+    axs[0].set_xlabel("Layer shape")
     axs[0].bar(np.arange(len(frob_norms)), frob_norms)
     if p_shapes:
         axs[0].set_xticks(np.arange(len(frob_norms)))
         axs[0].set_xticklabels([str(s) for s in p_shapes], rotation=45, ha="right")
 
     axs[1].set_title(f"Spectral norm of update per layer ({label})")
-    axs[1].set_xlabel("Hidden Size of layer")
+    axs[1].set_xlabel("Layer shape")
     axs[1].bar(np.arange(len(spectral_norms)), spectral_norms)
     if p_shapes:
         axs[1].set_xticks(np.arange(len(spectral_norms)))
         axs[1].set_xticklabels([str(s) for s in p_shapes], rotation=45, ha="right")
 
     axs[2].set_title(f"Induced norm of update per layer ({label})")
-    axs[2].set_xlabel("Hidden Size of layer")
+    axs[2].set_xlabel("Layer shape")
     axs[2].bar(np.arange(len(induced_norms)), induced_norms)
     if p_shapes:
         axs[2].set_xticks(np.arange(len(induced_norms)))
@@ -179,8 +193,8 @@ def train_one_step_matrices(
 
 
 def train_with_lr(
-    hiddens: List[int] = [64, 64, 64],
-    optimizer: Callable = None,
+    hiddens: Optional[Sequence[int]] = None,
+    optimizer: Optional[Callable] = None,
     lr: float = 0.01,
     *,
     train_images: Optional[Tensor] = None,
@@ -189,11 +203,18 @@ def train_with_lr(
     valid_labels: Optional[Tensor] = None,
     device: Optional[torch.device] = None,
     steps: int = 100,
-):
+    seed: Optional[int] = None,
+) -> float:
     """
     Train for a number of steps and return mean of last validation losses (same
     behavior used in the notebook sweep).
     """
+    if seed is not None:
+        set_seed(seed)
+
+    if hiddens is None:
+        hiddens = [64, 64, 64]
+
     if optimizer is None:
         raise ValueError("optimizer class must be provided")
     if train_images is None or train_labels is None:
@@ -203,35 +224,28 @@ def train_with_lr(
 
     device = get_device() if device is None else device
 
-    torch.manual_seed(4)
-    np.random.seed(4)
-
-    model = __import__("models").models.MLP(hidden_sizes=hiddens) if False else None
-    # We import models lazily to avoid circular imports when used as a module.
-    from q_mup_coding_refactor.src.models import MLP
-
-    model = MLP(hidden_sizes=hiddens).to(device)
+    from models import MLP
+    model = MLP(hidden_sizes=list(hiddens)).to(device)
     criterion = nn.CrossEntropyLoss()
     optim_inst = optimizer(model.parameters(), lr=lr)
     losses: List[float] = []
 
-    for i in range(steps):
+    for _ in range(steps):
         batch_idx = np.random.randint(0, len(train_images), size=64)
 
-        images_batch = train_images[batch_idx]
-        labels_batch = train_labels[batch_idx]
-        images_batch, labels_batch = images_batch.to(device), labels_batch.to(device)
+        images_batch = to_device(train_images[batch_idx], device)
+        labels_batch = to_device(train_labels[batch_idx], device)
 
-        optim_inst.zero_grad()
+        optim_inst.zero_grad(set_to_none=True)
         outputs, _ = model(images_batch)
         loss = criterion(outputs, labels_batch)
         loss.backward()
         optim_inst.step()
 
-        with torch.no_grad():
-            outputs_valid, _ = model(valid_images.to(device))
-            valid_losses = criterion(outputs_valid, valid_labels.to(device))
-            losses.append(valid_losses.item())
+        with torch.inference_mode():
+            outputs_valid, _ = model(to_device(valid_images, device))
+            valid_losses = criterion(outputs_valid, to_device(valid_labels, device))
+            losses.append(float(valid_losses.item()))
 
     return float(np.mean(np.array(losses)[-5:]))
 
