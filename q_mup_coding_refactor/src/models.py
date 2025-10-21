@@ -102,10 +102,6 @@ class MLP(nn.Module):
         for layer in self.layers[:-1]:
             x = layer(x)
 
-            ## TODO
-            # Place any μP/scaling/normalization experiment here.
-            pass
-            ##
 
             x = self.sigmoid(x)
             activations.append(x)
@@ -200,7 +196,6 @@ class ScaledMLP(nn.Module):
             x = layer(x)
 
             ## TODO
-            # Place any μP/scaling/normalization experiment here.
             pass
             ##
 
