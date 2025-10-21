@@ -1,28 +1,20 @@
 """
-optimizer.py
+optimizers.py
 
-Refactored SimpleAdamMuP optimizer with preserved original variable naming
-(`m`, `v`, `m_hat`, `v_hat`, `u`, `b1`, `b2`), improved structure, and clear
-documentation for educational readability.
+Refactored collection of simplified optimizers for educational deep learning use.
+This module defines three lightweight optimizers—SimpleAdam, SimpleAdamMuP, and
+SimpleShampoo—rewritten for clarity, modularity, and readability while preserving
+their original teaching purpose and PyTorch compatibility.
 
-Implements a simplified Adam optimizer with optional MuP (Maximum Update
-Parametrization) scaling logic placeholder. Compatible with the PyTorch
-Optimizer API.
+- SimpleAdam: Minimal Adam implementation showing moving averages and bias correction.
+- SimpleAdamMuP: Adam variant with a TODO placeholder for per-layer MuP scaling.
+- SimpleShampoo: Simplified Shampoo optimizer with a TODO placeholder for preconditioning.
 
-Example:
-    >>> import torch
-    >>> from optimizer import SimpleAdamMuP
-    >>> model = torch.nn.Linear(10, 2)
-    >>> optimizer = SimpleAdamMuP(model.parameters(), lr=1e-3)
-    >>> loss_fn = torch.nn.MSELoss()
-    >>> x, y = torch.randn(8, 10), torch.randn(8, 2)
-    >>> for _ in range(100):
-    ...     optimizer.zero_grad()
-    ...     y_pred = model(x)
-    ...     loss = loss_fn(y_pred, y)
-    ...     loss.backward()
-    ...     optimizer.step()
+All optimizers include hyperparameter validation, explicit state initialization,
+and clear TODO hooks for experimentation. The code mirrors real PyTorch design
+patterns but remains intentionally simple for instructional clarity.
 """
+
 
 import torch
 from torch.optim.optimizer import Optimizer
@@ -31,7 +23,11 @@ from typing import Iterable, Optional, Tuple, Dict, Any
 
 class SimpleAdam(Optimizer):
     """
-    Simplified Adam optimizer implementation.
+    A minimal, educational implementation of the Adam optimizer.
+
+    This optimizer computes parameter updates using moving averages of both
+    gradients and their squares, with bias correction. It is designed to
+    illustrate the key concepts behind Adam while remaining clear and compact.
 
     Args:
         params (Iterable[Any]): Iterable of parameters to optimize.
@@ -40,8 +36,8 @@ class SimpleAdam(Optimizer):
         b2 (float): Exponential decay rate for second-moment estimates (β₂). Default is 0.999.
 
     Notes:
-        - This implementation is intentionally minimal for clarity and learning.
-        - It matches the original assignment’s variable names and logic.
+        - Follows the same variable naming as the original Adam algorithm (m, v, m_hat, v_hat).
+        - Designed for readability and teaching, not for large-scale training.
     """
 
     def __init__(
@@ -122,19 +118,23 @@ class SimpleAdam(Optimizer):
 
 class SimpleAdamMuP(Optimizer):
     """
-    Simplified Adam optimizer supporting optional per-layer MuP scaling.
+    Simplified Adam optimizer variant with support for MuP (Maximum Update Parametrization).
+
+    This class extends the base Adam logic and includes a placeholder for implementing
+    per-layer scaling factors used in MuP. The current version matches the structure of
+    the original educational code and raises a NotImplementedError at the MuP step.
 
     Args:
-        params: Iterable of model parameters to optimize.
-        lr: Learning rate (default 1e-3).
-        betas: Tuple of (b1, b2) coefficients for gradient and squared gradient moving averages.
-        eps: Small constant to avoid division by zero (default 1e-8).
-        weight_decay: L2 penalty term (default 0.0).
-        layer_scales: Optional mapping from parameter shapes to per-layer scaling factors.
+        params (Iterable): Model parameters to optimize.
+        lr (float): Learning rate. Default is 1e-3.
+        betas (Tuple[float, float]): Coefficients for moving averages of gradient and its square.
+        eps (float): Small constant to prevent division by zero. Default is 1e-16.
+        weight_decay (float): Optional L2 regularization term. Default is 0.0.
+        layer_scales (Optional[Dict]): Mapping from parameter shapes to scaling factors.
 
     Notes:
-        - This version maintains the same logic as the original homework Adam variant.
-        - The MuP scaling TODO is preserved for student implementation.
+        - The TODO block indicates where MuP per-layer scaling logic should be added.
+        - Maintains compatibility with standard PyTorch training loops.
     """
 
     def __init__(
@@ -224,29 +224,20 @@ class SimpleAdamMuP(Optimizer):
 
 class SimpleShampoo(Optimizer):
     """
-    Simplified Shampoo optimizer with exponential moving average of gradients.
+    Simplified version of the Shampoo optimizer for conceptual understanding.
+
+    Implements an exponential moving average of gradients and includes a TODO
+    placeholder for the layer-wise preconditioning step used in full Shampoo.
+    In its current form, it functions like a momentum-based variant of SGD.
 
     Args:
-        params (Any): Iterable of parameters to optimize or dicts defining parameter groups.
-        lr (float): Learning rate (default: 0.1).
-        b1 (float): Momentum coefficient (default: 0.9).
+        params (Iterable[Any]): Parameters to optimize.
+        lr (float): Learning rate. Default is 0.1.
+        b1 (float): Momentum coefficient. Default is 0.9.
 
     Notes:
-        - The implementation is intentionally simplified for conceptual teaching.
-        - The TODO marks where layer-wise preconditioning would be added in full Shampoo.
-        - This optimizer currently behaves like a momentum-based variant of SGD.
-
-    Example:
-        >>> import torch
-        >>> from optimizer_shampoo import SimpleShampoo
-        >>> model = torch.nn.Linear(10, 2)
-        >>> optimizer = SimpleShampoo(model.parameters(), lr=0.1)
-        >>> x, y = torch.randn(8, 10), torch.randn(8, 2)
-        >>> loss_fn = torch.nn.MSELoss()
-        >>> optimizer.zero_grad()
-        >>> loss = loss_fn(model(x), y)
-        >>> loss.backward()
-        >>> optimizer.step()
+        - The preconditioning step is intentionally omitted for simplicity.
+        - The TODO block marks where the matrix-based preconditioner can be added.
     """
 
     def __init__(self, params: Any, lr: float = 1e-1, b1: float = 0.9):
@@ -302,8 +293,8 @@ class SimpleShampoo(Optimizer):
                     u = m  # Ignore biases for this simplified version
                 else:
                     # Placeholder for matrix preconditioning logic
+                    raise NotImplementedError
                     u = m  # TODO: Implement preconditioning here
-                raise NotImplementedError
                 #######################################
 
                 # Parameter update
