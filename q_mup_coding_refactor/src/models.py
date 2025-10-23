@@ -10,26 +10,33 @@ InitKind = Literal["default", "xavier_uniform", "kaiming_uniform"]
 
 class MLP(nn.Module):
     """
-    Equal-width MLP identical to the original public interface.
+    Multi-layer perceptron with configurable hidden sizes.
 
     Args:
-        input_size: Flattened input dimension (28*28 for MNIST).
+        input_size: Flattened input dimension (e.g., 28*28 for MNIST).
         hidden_sizes: Hidden layer widths in order.
         num_classes: Number of output classes.
+        init: Optional initialization scheme ("default", "xavier_uniform",
+              or "kaiming_uniform"). Default preserves PyTorch behavior.
 
     Behavior preserved:
-      - Constructor signature and defaults are unchanged.
+      - Public interface identical to the original.
       - forward(x) returns (logits, activations) where the first hidden
         activation is dropped (activations = activations[1:]).
-      - TODO hook remains between Linear and Sigmoid in each hidden layer.
+      - A μP/experiment hook remains available between Linear and Sigmoid.
 
-    ML engineering upgrades:
-      - Type hints & docstrings
-      - Optional weight init via `init` (default "default" means PyTorch default)
-      - Input validation/guardrails
-      - Centralized layer building and reset_parameters()
+    Software engineering improvements:
+      - Type hints and Google-style docstrings (PEP 257)
+      - Input validation and fail-fast guardrails
+      - Centralized layer creation and initialization
+      - Custom __repr__ for quick configuration inspection
 
-    Note: We DO NOT change initialization by default to maintain parity.
+    ML engineering improvements:
+      - Optional deterministic initialization (Xavier or Kaiming)
+      - Support for reproducibility studies (set global torch seeds externally)
+
+    Note: Default initialization uses PyTorch’s internal reset_parameters()
+    to ensure parity with the original notebook behavior.
     """
 
     def __init__(
@@ -42,7 +49,7 @@ class MLP(nn.Module):
     ) -> None:
         super().__init__()
 
-        # Guardrails (fail fast on common mistakes)
+        # Guardrails — fail fast on invalid input
         if input_size <= 0 or num_classes <= 0:
             raise ValueError("input_size and num_classes must be > 0")
         if not hidden_sizes or any(h <= 0 for h in hidden_sizes):
@@ -57,27 +64,31 @@ class MLP(nn.Module):
         self.layers = self._build_linears(sizes, bias=True)
         self.sigmoid = nn.Sigmoid()
 
-        # Do NOT force a new init by default; keep PyTorch defaults for parity.
+        # Maintain PyTorch default initialization unless explicitly overridden
         if self.init_kind != "default":
             self.reset_parameters()
 
     def _build_linears(self, sizes: List[int], *, bias: bool) -> nn.ModuleList:
+        """Construct a sequential list of Linear layers."""
         return nn.ModuleList(
             [nn.Linear(sizes[i], sizes[i + 1], bias=bias) for i in range(len(sizes) - 1)]
         )
 
     def reset_parameters(self) -> None:
         """
-        Optional deterministic init you can call in experiments.
-        Default ("default"): keep PyTorch’s internal reset for each layer.
+        Optional deterministic initialization.
+
+        Default ("default"): use PyTorch’s built-in reset_parameters().
+        For custom schemes, supports:
+          - "xavier_uniform"
+          - "kaiming_uniform" (note: designed for ReLU activations)
         """
         if self.init_kind == "default":
-            # Respect PyTorch's built-in reset_parameters() as-is.
             for layer in self.layers:
                 layer.reset_parameters()
             return
 
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             if not isinstance(layer, nn.Linear):
                 continue
             if self.init_kind == "xavier_uniform":
@@ -95,13 +106,16 @@ class MLP(nn.Module):
             raise ValueError(f"Expected input with at least 2 dims, got shape {tuple(x.shape)}")
 
         activations: List[Tensor] = []
-        # Flatten batch to [B, input_size] — matches original behavior
+        # Flatten to [batch_size, input_size] — matches original notebook
         x = x.flatten(1)
 
         # Hidden layers
         for layer in self.layers[:-1]:
             x = layer(x)
 
+            ## μP/Experiment hook — optional scaling or manipulation point
+            pass
+            ##
 
             x = self.sigmoid(x)
             activations.append(x)
@@ -109,9 +123,8 @@ class MLP(nn.Module):
         # Final linear head (logits)
         x = self.layers[-1](x)
 
-        # Original notebook dropped the first activation
+        # Match original behavior — drop first activation and detach
         activations = activations[1:]
-        # Detach activations as in original
         return x, [a.detach() for a in activations]
 
     def __repr__(self) -> str:
@@ -123,17 +136,19 @@ class MLP(nn.Module):
 
 class ScaledMLP(nn.Module):
     """
-    Bias-free variant with the same public interface and hook positions.
+    Bias-free MLP variant for μP scaling experiments.
 
     Args:
         input_size: Flattened input dimension.
         hidden_sizes: Hidden layer widths in order.
         num_classes: Number of output classes.
-        init: Optional weight init (default keeps PyTorch defaults).
+        init: Optional initialization scheme ("default", "xavier_uniform",
+              or "kaiming_uniform"). Default preserves PyTorch behavior.
 
     Notes:
-      - Keeps the TODO hook and activation trimming behavior.
+      - Keeps the μP/experiment hook and activation trimming behavior.
       - All Linear layers are constructed with bias=False.
+      - Initialization behavior mirrors MLP for reproducibility.
     """
 
     def __init__(
@@ -142,7 +157,7 @@ class ScaledMLP(nn.Module):
         hidden_sizes: List[int] = [8, 16, 32, 64, 128],
         num_classes: int = 10,
         *,
-        init: InitKind = "default",  # optional, non-breaking
+        init: InitKind = "default",
     ) -> None:
         super().__init__()
 
@@ -164,11 +179,13 @@ class ScaledMLP(nn.Module):
             self.reset_parameters()
 
     def _build_linears(self, sizes: List[int], *, bias: bool) -> nn.ModuleList:
+        """Construct a sequential list of Linear layers."""
         return nn.ModuleList(
             [nn.Linear(sizes[i], sizes[i + 1], bias=bias) for i in range(len(sizes) - 1)]
         )
 
     def reset_parameters(self) -> None:
+        """Same semantics as MLP.reset_parameters(), bias omitted."""
         if self.init_kind == "default":
             for layer in self.layers:
                 layer.reset_parameters()
@@ -183,7 +200,6 @@ class ScaledMLP(nn.Module):
                 nn.init.kaiming_uniform_(layer.weight, nonlinearity="linear")
             else:
                 raise ValueError(f"Unknown init kind: {self.init_kind}")
-            # bias is always None in ScaledMLP
 
     def forward(self, x: Tensor) -> Tuple[Tensor, List[Tensor]]:
         if x.dim() < 2:
@@ -195,7 +211,7 @@ class ScaledMLP(nn.Module):
         for layer in self.layers[:-1]:
             x = layer(x)
 
-            ## TODO
+            ## μP/Experiment hook — preserved for scaling studies
             pass
             ##
 

@@ -9,25 +9,29 @@ from torch import Tensor
 
 
 def set_seed(seed: int = 4) -> None:
+    """Set Python, NumPy, and PyTorch seeds for reproducible experiments."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
 
 def get_device() -> torch.device:
+    """Return CUDA if available, otherwise CPU (unified device handling)."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def to_device(t: Tensor, device: Optional[torch.device]) -> Tensor:
+    """Move tensor to device if provided (no-op if device is None)."""
     return t if device is None else t.to(device)
 
 
 def rms(x: torch.Tensor, dim=None, keepdim: bool = False) -> torch.Tensor:
+    """Numerically-stable RMS with small epsilon to avoid sqrt(0)."""
     return torch.sqrt(torch.mean(x**2, dim=dim, keepdim=keepdim) + 1e-12)
 
 
 def train_one_step(
-    mlp: Callable,                    # factory/class, must accept hidden_sizes=
+    mlp: Callable,                    # factory/class; must accept hidden_sizes=
     hiddens: Optional[Sequence[int]] = None,
     optimizer: Callable = None,       # e.g., torch.optim.Adam or SimpleAdam
     label: str = "Adam",
@@ -40,31 +44,41 @@ def train_one_step(
     seed: Optional[int] = None,
 ) -> Tuple[float, float]:
     """
-    Builds a model, runs two steps on the same batch, and plots RMS of activation deltas per layer.
-    The model's forward must return (logits, activations).
+    Build a model, run two optimizer steps on the same batch, and visualize
+    the RMS of activation deltas per (returned) hidden layer.
+
+    Contract:
+      - `mlp(...)` constructs a model whose forward returns `(logits, activations)`.
+      - `activations` correspond to hidden layers with the first hidden activation
+        already dropped by the model (matching original notebook behavior).
+
+    Returns:
+      (last_step_loss, last_step_batch_accuracy)
     """
     if seed is not None:
         set_seed(seed)
-
     if hiddens is None:
         hiddens = [8, 16, 32, 64, 128]
-
     if optimizer is None:
         raise ValueError("optimizer class must be provided")
 
     device = get_device() if device is None else device
 
+    # Construct model; keep public interface parity with the notebook
     model = mlp(hidden_sizes=list(hiddens)).to(device)
     criterion = nn.CrossEntropyLoss()
     optim_inst = optimizer(model.parameters(), lr=lr)
 
-    # pick a batch if none given
+    # Pick a batch if none given
     if batch_idx is None:
+        if len(train_images) == 0:
+            raise ValueError("train_images must be non-empty")
         batch_idx = np.random.randint(0, len(train_images), size=64)
 
-    prev_activations = None
+    prev_activations: Optional[List[Tensor]] = None
     activation_deltas_rms: List[float] = []
 
+    # Two consecutive steps to measure activation drift
     for i in range(2):
         images_batch = to_device(train_images[batch_idx], device)
         labels_batch = to_device(train_labels[batch_idx], device)
@@ -76,24 +90,27 @@ def train_one_step(
         optim_inst.step()
 
         if i > 0 and prev_activations is not None:
+            # Delta per returned hidden layer
             deltas = [a - pa for a, pa in zip(activations, prev_activations)]
+            # Mean of per-example RMS across the batch (stable summary)
             activation_deltas_rms = [rms(d, dim=-1).mean().item() for d in deltas]
 
+        # Detach to avoid holding graphs across iterations
         prev_activations = [a.detach() for a in activations]
 
-    # plot
+    # Visualization: activation drift per returned hidden layer
     if activation_deltas_rms:
         xs = np.arange(len(activation_deltas_rms))
         plt.figure(figsize=(8, 4))
         plt.title(f"RMS of activation deltas per layer ({label})")
-        plt.xlabel("Hidden layer index")
+        plt.xlabel("Hidden layer index (returned)")
         plt.bar(xs, activation_deltas_rms)
-        # labels correspond to returned activations (first hidden dropped)
+        # Labels correspond to returned activations (first hidden was dropped upstream)
         tick_labels = list(hiddens[1:]) if len(hiddens) > 1 else list(hiddens)
         plt.xticks(xs, tick_labels)
         plt.show()
 
-    # return last-step loss/acc for logging
+    # Batch accuracy for quick feedback (same step as final loss)
     with torch.no_grad():
         acc = (logits.argmax(1) == labels_batch).float().mean().item()
     return float(loss.item()), float(acc)
@@ -112,12 +129,24 @@ def train_one_step_matrices(
     device: Optional[torch.device] = None,
     seed: Optional[int] = None,
 ) -> None:
+    """
+    Single optimizer step and parameter-update diagnostics.
+
+    Plots:
+      - Frobenius norm per weight matrix update
+      - Spectral norm (largest singular value) per update
+      - A simple induced RMS-RMS proxy per update
+
+    Notes:
+      - Expects the model's forward to return (logits, activations).
+      - μP/Shampoo hooks are preserved as instructional TODOs at the model level.
+    """
     if seed is not None:
         set_seed(seed)
     if hiddens is None:
         hiddens = [8, 16, 64, 64, 64, 256, 256, 1024]
     if mlp is None:
-        from models import MLP as _MLP
+        from models import MLP as _MLP  # lazy import to avoid circulars in docs
         mlp = _MLP
     if optimizer is None:
         raise ValueError("optimizer class must be provided")
@@ -131,8 +160,11 @@ def train_one_step_matrices(
     optim_inst = optimizer(model.parameters(), lr=lr)
 
     if batch_idx is None:
+        if len(train_images) == 0:
+            raise ValueError("train_images must be non-empty")
         batch_idx = np.random.randint(0, len(train_images), size=64)
 
+    # Snapshot parameters before the step
     old_params = [p.detach().clone() for p in model.parameters()]
 
     images_batch = to_device(train_images[batch_idx], device)
@@ -144,9 +176,11 @@ def train_one_step_matrices(
     loss.backward()
     optim_inst.step()
 
+    # Compute parameter deltas
     new_params = [p.detach().clone() for p in model.parameters()]
     delta_params = [new - old for new, old in zip(new_params, old_params)]
 
+    # Collect norms for 2D weights (skip biases/1D tensors)
     frob_norms: List[float] = []
     spectral_norms: List[float] = []
     induced_norms: List[float] = []
@@ -157,15 +191,16 @@ def train_one_step_matrices(
             cpu_p = p.detach().float().cpu()
             p_shapes.append(tuple(cpu_p.shape))
             frob_norms.append(float(torch.linalg.norm(cpu_p)))
+            # Spectral norm via SVD (robust fallback)
             try:
-                # faster + stable for tall/wide matrices
                 _, s, _ = torch.linalg.svd(cpu_p, full_matrices=False)
                 spectral_norms.append(float(s[0]))
             except Exception:
                 spectral_norms.append(0.0)
-            # Induced RMS-RMS placeholder: mean RMS of rows
+            # Simple induced proxy: mean RMS across rows
             induced_norms.append(float(torch.mean(rms(cpu_p, dim=1))))
 
+    # Visualization of update norms
     fig, axs = plt.subplots(1, 3, figsize=(20, 6))
 
     axs[0].set_title(f"Frobenius norm of update per layer ({label})")
@@ -206,15 +241,19 @@ def train_with_lr(
     seed: Optional[int] = None,
 ) -> float:
     """
-    Train for a number of steps and return mean of last validation losses (same
-    behavior used in the notebook sweep).
+    Train for a fixed number of steps and return a stable summary metric:
+    the mean of the last few validation losses (matches the original sweep).
+
+    Notes:
+      - Uses CrossEntropyLoss.
+      - Expects model forward to return (logits, activations).
+      - Determinism requires setting global seeds via `set_seed` (or externally).
     """
     if seed is not None:
         set_seed(seed)
 
     if hiddens is None:
         hiddens = [64, 64, 64]
-
     if optimizer is None:
         raise ValueError("optimizer class must be provided")
     if train_images is None or train_labels is None:
@@ -224,6 +263,7 @@ def train_with_lr(
 
     device = get_device() if device is None else device
 
+    # Keep dependency local to avoid circular imports in some teaching setups
     from models import MLP
     model = MLP(hidden_sizes=list(hiddens)).to(device)
     criterion = nn.CrossEntropyLoss()
@@ -242,27 +282,31 @@ def train_with_lr(
         loss.backward()
         optim_inst.step()
 
+        # Validation loss (metric averaging done at the end for stability)
         with torch.inference_mode():
             outputs_valid, _ = model(to_device(valid_images, device))
             valid_losses = criterion(outputs_valid, to_device(valid_labels, device))
             losses.append(float(valid_losses.item()))
 
+    # Stable metric: mean of last-k validation losses (k=5 as in the notebook)
     return float(np.mean(np.array(losses)[-5:]))
 
 
 def train_one_epoch(*args, **kwargs):
-    # thin wrapper placeholder
+    """Thin wrapper retained for API parity with the original notebook."""
     return train_with_lr(*args, **kwargs)
 
 
 def evaluate(*args, **kwargs):
-    # alias for convenience
+    """Alias for convenience; mirrors original usage in the notebook."""
     return train_with_lr(*args, **kwargs)
 
 
 def fit(*args, **kwargs):
+    """Alias retained for backward compatibility with prior cells."""
     return train_with_lr(*args, **kwargs)
 
 
 def legacy_train_one_step(*args, **kwargs):
+    """Legacy name preserved to ease migration of older notebook cells."""
     return train_one_step(*args, **kwargs)
