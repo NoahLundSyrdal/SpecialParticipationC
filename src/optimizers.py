@@ -19,6 +19,7 @@ patterns but remains intentionally simple for instructional clarity.
 import torch
 from torch.optim.optimizer import Optimizer
 from typing import Iterable, Optional, Tuple, Dict, Any
+import numpy as np
 
 
 class SimpleAdam(Optimizer):
@@ -110,11 +111,7 @@ class SimpleAdam(Optimizer):
                 p.add_(u, alpha=-lr)
 
         return None
-
-
-
-
-
+    
 
 class SimpleAdamMuP(Optimizer):
     """
@@ -158,7 +155,6 @@ class SimpleAdamMuP(Optimizer):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
-        # Optional MuP scaling factors keyed by parameter shapes
         self.layer_scales = layer_scales or {}
 
     @torch.no_grad()
@@ -178,10 +174,8 @@ class SimpleAdamMuP(Optimizer):
                 if grad.is_sparse:
                     raise RuntimeError("SimpleAdamMuP does not support sparse gradients")
 
-                # Retrieve the optimizer state for this parameter
                 state = self.state[p]
 
-                # Initialize state if first update
                 if len(state) == 0:
                     state["step"] = 0
                     state["momentum"] = torch.zeros_like(p)
@@ -190,31 +184,29 @@ class SimpleAdamMuP(Optimizer):
                 state["step"] += 1
                 m, v = state["momentum"], state["variance"]
 
-                # Apply weight decay if requested
                 if wd != 0:
                     grad = grad.add(p.data, alpha=wd)
 
-                # Update exponential moving averages
                 m.mul_(b1).add_(grad, alpha=1 - b1)
                 v.mul_(b2).addcmul_(grad, grad, value=1 - b2)
 
-                # Compute bias-corrected estimates
                 m_hat = m / (1 - b1 ** state["step"])
                 v_hat = v / (1 - b2 ** state["step"])
 
-                # Compute parameter update direction
                 u = m_hat / (torch.sqrt(v_hat) + eps)
 
-                ############################
-                ### Todo: Adjust the per-layer learning rate scaling factor so per-layer RMS activation deltas are constant.
+                ###############################################
+                ###############################################
+                ### TODO: Adjust the per-layer learning rate scaling factor so per-layer RMS activation deltas are constant.
                 ### Hint for part e: The following tricks will help you retain performance when using muP scaling.
                 ###  - Treat biases as a hidden layer with size (d_out, 1). You will need to use a fudge-factor of around 0.01 -- we want to keep the change in bias terms low.
                 ###  - For the input layer, a fudge factor of 10 appears to help.
                 ###  - For the output layer, we find it is best to ignore the muP scaling, and instead use a fixed learning rate (e.g. 0.003).
-                ############################
-                raise NotImplementedError
-                ############################
-                ############################
+                ###############################################
+                ###############################################
+                raise NotImplementedError("MuP scaling not yet implemented in SimpleAdamMuP.")
+                ###############################################
+                ###############################################
 
                 # Update parameters
                 p.add_(u, alpha=-lr)
@@ -283,21 +275,59 @@ class SimpleShampoo(Optimizer):
                 # Update momentum buffer
                 m.lerp_(grad, 1 - b1)
 
+                ###############################################
+                ###############################################
                 # TODO ########################
                 # In full Shampoo, this is where you would apply a
                 # preconditioner derived from the second-order
                 # statistics of the gradient. For simplicity,
                 # we ignore this and just use `m` directly.
-                #######################################
-                if len(m.shape) == 1:
-                    u = m  # Ignore biases for this simplified version
-                else:
-                    # Placeholder for matrix preconditioning logic
-                    raise NotImplementedError
-                    u = m  # TODO: Implement preconditioning here
-                #######################################
+                ###############################################
+                ###############################################
+                raise NotImplementedError("Preconditioning not yet implemented in SimpleShampoo.")
+                ###############################################
+                ###############################################
 
                 # Parameter update
                 p.add_(u, alpha=-lr)
 
+        return None
+
+class SimpleShampooScaled(Optimizer):
+    """
+    Simplified Shampoo optimizer variant with μP scaling for the preconditioner.
+    """
+    def __init__(
+        self,
+        params: Any,
+        lr: float = 1e-1,
+        b1: float = 0.9,
+    ):
+        defaults = dict(lr=lr, b1=b1)
+        super(SimpleShampooScaled, self).__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self):
+        for group in self.param_groups:
+            for p in group['params']:
+                grad = p.grad.data
+
+                state = self.state[p]
+                if len(state) == 0: # Initialization
+                    state["step"] = torch.tensor(0.0)
+                    state['momentum'] = torch.zeros_like(p)
+
+                state['step'] += 1
+                m = state['momentum']
+                m.lerp_(grad, 1-group["b1"])
+
+                ###############################################
+                ###############################################
+                # TODO: Apply μP scaling to the preconditioner here
+                ###############################################
+                ###############################################
+                raise NotImplementedError("MuP scaling not yet implemented in SimpleShampooScaled.")
+                ###############################################
+                ###############################################
+                p.add_(u, alpha=-group['lr'])
         return None

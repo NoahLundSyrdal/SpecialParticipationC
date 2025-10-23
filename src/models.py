@@ -112,11 +112,6 @@ class MLP(nn.Module):
         # Hidden layers
         for layer in self.layers[:-1]:
             x = layer(x)
-
-            ## μP/Experiment hook — optional scaling or manipulation point
-            pass
-            ##
-
             x = self.sigmoid(x)
             activations.append(x)
 
@@ -150,74 +145,36 @@ class ScaledMLP(nn.Module):
       - All Linear layers are constructed with bias=False.
       - Initialization behavior mirrors MLP for reproducibility.
     """
-
-    def __init__(
-        self,
-        input_size: int = 784,
-        hidden_sizes: List[int] = [8, 16, 32, 64, 128],
-        num_classes: int = 10,
-        *,
-        init: InitKind = "default",
-    ) -> None:
-        super().__init__()
-
-        if input_size <= 0 or num_classes <= 0:
-            raise ValueError("input_size and num_classes must be > 0")
-        if not hidden_sizes or any(h <= 0 for h in hidden_sizes):
-            raise ValueError("hidden_sizes must be non-empty and all > 0")
-
-        self.input_size = int(input_size)
-        self.hidden_sizes = [int(h) for h in hidden_sizes]
-        self.num_classes = int(num_classes)
-        self.init_kind: InitKind = init
-
-        sizes = [self.input_size] + self.hidden_sizes + [self.num_classes]
-        self.layers = self._build_linears(sizes, bias=False)
+    def __init__(self, input_size=784, hidden_sizes = [8, 16, 32, 64, 128], num_classes=10):
+        super(ScaledMLP, self).__init__()
+        all_hidden_sizes = [input_size] + hidden_sizes + [num_classes]
+        self.layers = nn.ModuleList()
+        for i in range(len(all_hidden_sizes)-1):
+            self.layers.append(nn.Linear(all_hidden_sizes[i], all_hidden_sizes[i+1], bias=False))
         self.sigmoid = nn.Sigmoid()
 
-        if self.init_kind != "default":
-            self.reset_parameters()
-
-    def _build_linears(self, sizes: List[int], *, bias: bool) -> nn.ModuleList:
-        """Construct a sequential list of Linear layers."""
-        return nn.ModuleList(
-            [nn.Linear(sizes[i], sizes[i + 1], bias=bias) for i in range(len(sizes) - 1)]
-        )
-
-    def reset_parameters(self) -> None:
-        """Same semantics as MLP.reset_parameters(), bias omitted."""
-        if self.init_kind == "default":
+        ## Rescale weight initializations to account for pre-activation scaling
+        with torch.no_grad():
             for layer in self.layers:
-                layer.reset_parameters()
-            return
+                layer.weight.mul_(layer.weight.shape[1])
+        ##
 
-        for layer in self.layers:
-            if not isinstance(layer, nn.Linear):
-                continue
-            if self.init_kind == "xavier_uniform":
-                nn.init.xavier_uniform_(layer.weight)
-            elif self.init_kind == "kaiming_uniform":
-                nn.init.kaiming_uniform_(layer.weight, nonlinearity="linear")
-            else:
-                raise ValueError(f"Unknown init kind: {self.init_kind}")
-
-    def forward(self, x: Tensor) -> Tuple[Tensor, List[Tensor]]:
-        if x.dim() < 2:
-            raise ValueError(f"Expected input with at least 2 dims, got shape {tuple(x.shape)}")
-
-        activations: List[Tensor] = []
-        x = x.flatten(1)
-
+    def forward(self, x):
+        activations = []
+        x = x.view(x.size(0), -1)  # Flatten: (batch_size, 28*28)
         for layer in self.layers[:-1]:
             x = layer(x)
-
-            ## μP/Experiment hook — preserved for scaling studies
-            pass
-            ##
-
+            ###############################################
+            ###############################################
+            # TODO: Apply μP scaling to pre-activations here
+            ###############################################
+            ###############################################
+            raise NotImplementedError("MuP scaling not yet implemented in ScaledMLP.")
+            ###############################################
+            ###############################################
+            
             x = self.sigmoid(x)
             activations.append(x)
-
         x = self.layers[-1](x)
         activations = activations[1:]
         return x, [a.detach() for a in activations]
@@ -227,4 +184,3 @@ class ScaledMLP(nn.Module):
             f"ScaledMLP(input_size={self.input_size}, hidden_sizes={self.hidden_sizes}, "
             f"num_classes={self.num_classes}, init='{self.init_kind}')"
         )
-
